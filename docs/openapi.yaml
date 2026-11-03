@@ -1,0 +1,51 @@
+openapi: 3.0.3
+info:
+  title: Архиватор — API решения команды
+  version: v1
+  description: Правила и заголовки, смысл — спецификация проекта (раздел «Общие правила API»).
+servers:
+  - url: "{baseUrl}"
+    variables:
+      baseUrl: { default: "https://team-001.example.org" }
+security:
+  - bearer: []
+paths:
+  /v1/health:
+    get:
+      summary: Проверка доступности
+      responses:
+        "200":
+          description: Жив
+          content:
+            application/json:
+              schema: { type: object, required: [status], properties: { status: { type: string, enum: [ok] } } }
+  /v1/compress:
+    post:
+      summary: Сжать файл
+      parameters:
+        - { name: X-Arena-File, in: header, schema: { type: string } }
+        - { name: X-Arena-Size, in: header, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "200":
+          description: Архив (не больше 2 × размер + 1024 байт)
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+  /v1/decompress:
+    post:
+      summary: Распаковать архив
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "200":
+          description: Исходные байты
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
