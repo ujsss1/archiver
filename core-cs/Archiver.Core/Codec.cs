@@ -333,3 +333,144 @@ sealed class ContextMixingModel : IModel
         return table;
     }
 }
+
+// ---------- Блочный режим: большой файл сжимается кусками на нескольких ядрах ----------
+// Каждый блок сжимается своей моделью независимо, поэтому блоки можно сжимать и распаковывать одновременно.
+// Цена — модель каждого блока учится с нуля, сжатие чуть хуже (около 1 %).
+//
+// Формат: [число блоков][сжатый размер каждого блока, кроме последнего][блоки подряд]
+// Числа записаны по 7 бит в байте, как размер файла в Codec.
+static class BlockCodec
+{
+    private const int MaxBlocks = 64; // защита от битого архива: больше блоков мы никогда не пишем
+
+    public static byte[] Compress(byte[] data, int blocks, Func<IModel> newModel)
+    {
+        var blockSize = (data.Length + blocks - 1) / blocks;
+        var parts = new byte[blocks][];
+
+        Parallel.For(0, blocks, i =>
+        {
+            var start = Math.Min(i * blockSize, data.Length);
+            var length = Math.Min(blockSize, data.Length - start);
+            parts[i] = Codec.Compress(data.AsSpan(start, length).ToArray(), newModel());
+        });
+
+        using var output = new MemoryStream();
+        WriteNumber(output, (ulong)blocks);
+
+        for (var i = 0; i < blocks - 1; i++)
+        {
+            WriteNumber(output, (ulong)parts[i].Length);
+        }
+
+        foreach (var part in parts)
+        {
+            output.Write(part);
+        }
+
+        return output.ToArray();
+    }
+
+    // Один блок уже сжат (проба на маленьком файле): только добавляем заголовок
+    public static byte[] WrapSingle(byte[] stream)
+    {
+        var result = new byte[stream.Length + 1];
+        result[0] = 1;
+        stream.CopyTo(result, 1);
+        return result;
+    }
+
+    public static byte[] Decompress(byte[] payload, Func<IModel> newModel)
+    {
+        var position = 0;
+        var blocks = ReadNumber(payload, ref position);
+
+        if (blocks < 1 || blocks > MaxBlocks)
+        {
+            throw new InvalidDataException($"Неправдоподобное число блоков: {blocks}");
+        }
+
+        // Находим, где начинается каждый блок
+        var starts = new int[blocks];
+        var lengths = new int[blocks];
+        var sizes = new long[blocks - 1];
+
+        for (var i = 0; i < blocks - 1; i++)
+        {
+            sizes[i] = ReadNumber(payload, ref position);
+        }
+
+        for (var i = 0; i < blocks; i++)
+        {
+            var length = i < blocks - 1 ? sizes[i] : payload.Length - position;
+
+            if (length < 0 || length > payload.Length - position)
+            {
+                throw new InvalidDataException("Архив обрезан: блок выходит за конец данных");
+            }
+
+            starts[i] = position;
+            lengths[i] = (int)length;
+            position += (int)length;
+        }
+
+        var parts = new byte[blocks][];
+
+        Parallel.For(0, (int)blocks, i =>
+        {
+            parts[i] = Codec.Decompress(payload.AsSpan(starts[i], lengths[i]).ToArray(), newModel());
+        });
+
+        // Склеиваем блоки обратно
+        var total = parts.Sum(part => (long)part.Length);
+
+        if (total > int.MaxValue)
+        {
+            throw new InvalidDataException("Неправдоподобный размер файла в архиве");
+        }
+
+        var result = new byte[total];
+        var offset = 0;
+
+        foreach (var part in parts)
+        {
+            part.CopyTo(result, offset);
+            offset += part.Length;
+        }
+
+        return result;
+    }
+
+    private static void WriteNumber(Stream output, ulong value)
+    {
+        while (value >= 0x80)
+        {
+            output.WriteByte((byte)(value | 0x80));
+            value >>= 7;
+        }
+
+        output.WriteByte((byte)value);
+    }
+
+    private static long ReadNumber(byte[] data, ref int position)
+    {
+        var value = 0L;
+
+        for (var shift = 0; ; shift += 7)
+        {
+            if (position == data.Length || shift > 35)
+            {
+                throw new InvalidDataException("Архив обрезан или число записано неверно");
+            }
+
+            var part = data[position++];
+            value |= (long)(part & 0x7F) << shift;
+
+            if (part < 0x80)
+            {
+                return value;
+            }
+        }
+    }
+}

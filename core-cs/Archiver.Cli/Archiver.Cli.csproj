@@ -7,6 +7,9 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyName>archiver</AssemblyName>
+    <!-- Сразу полностью оптимизированный код: иначе первые секунды .NET работает медленнее,
+         и проба времени ошибочно решит, что файл не успеет сжаться -->
+    <TieredCompilation>false</TieredCompilation>
   </PropertyGroup>
 
   <ItemGroup>

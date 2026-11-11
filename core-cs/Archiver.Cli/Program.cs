@@ -2,7 +2,7 @@
 //
 //   archiver compress   <вход> <выход>   сжать файл («-» вместо имени: stdin / stdout)
 //   archiver decompress <вход> <выход>   распаковать архив
-//   archiver bench      <папка> [--no-filters]   таблица замеров по всем файлам папки
+//   archiver bench      <папка> [--no-filters] [--blocks N]   таблица замеров по всем файлам папки
 //   archiver selftest   <файл>           проверка: испорченные архивы должны отклоняться
 //
 // Коды выхода: 0 — успех, 2 — некорректный архив (сервис отвечает 4xx), 1 — прочие ошибки.
@@ -17,9 +17,9 @@ try
 {
     return args switch
     {
-        ["compress", var input, var output] => Run(input, output, ArchiveCodec.Compress),
+        ["compress", var input, var output] => Run(input, output, CompressWithReport),
         ["decompress", var input, var output] => Run(input, output, ArchiveCodec.Decompress),
-        ["bench", var folder, .. var rest] => Bench(folder, !rest.Contains("--no-filters")),
+        ["bench", var folder, .. var rest] => Bench(folder, ParseOptions(rest)),
         ["selftest", var file] => SelfTest(file),
         _ => Usage(),
     };
@@ -52,6 +52,15 @@ static int Run(string input, string output, Func<byte[], byte[]> action)
     return 0;
 }
 
+// Отчёт пишем в stderr: результат сжатия идёт в stdout или файл, и отчёт ему не мешает
+static byte[] CompressWithReport(byte[] data)
+{
+    var archive = ArchiveCodec.Compress(data, CompressOptions.Default, out var report);
+    Console.Error.WriteLine($"тип: {report.Kind}, метод: {report.Method}, блоков: {report.Blocks}, " +
+        $"прогноз распаковки: {report.PredictedSeconds:F1} с, {data.Length} → {archive.Length} байт");
+    return archive;
+}
+
 static byte[] Read(string input)
 {
     if (input != "-")
@@ -65,13 +74,19 @@ static byte[] Read(string input)
     return buffer.ToArray();
 }
 
-static int Bench(string folder, bool useFilters)
+static CompressOptions ParseOptions(string[] rest)
 {
-    var options = new CompressOptions(useFilters);
+    var blocksIndex = Array.IndexOf(rest, "--blocks");
+    int? forceBlocks = blocksIndex >= 0 && blocksIndex + 1 < rest.Length ? int.Parse(rest[blocksIndex + 1]) : null;
+    return new CompressOptions(!rest.Contains("--no-filters"), forceBlocks);
+}
+
+static int Bench(string folder, CompressOptions options)
+{
     var files = Directory.GetFiles(folder);
     Array.Sort(files, StringComparer.Ordinal);
 
-    Console.WriteLine("файл | тип | метод | проба | размер | архив | коэф | сжатие, с | распаковка, с | лимит, с | совпало | статус");
+    Console.WriteLine("файл | тип | метод | проба | блоков | прогноз, с | размер | архив | коэф | сжатие, с | распаковка, с | лимит, с | совпало | статус");
 
     var totalSize = 0L;
     var totalArchive = 0L;
@@ -96,7 +111,7 @@ static int Bench(string folder, bool useFilters)
         totalSize += data.Length;
         totalArchive += archive.Length;
 
-        Console.WriteLine($"{Path.GetFileName(file)} | {report.Kind} | {report.Method} | {report.SampleRatio:F3} | {data.Length} | {archive.Length} | " +
+        Console.WriteLine($"{Path.GetFileName(file)} | {report.Kind} | {report.Method} | {report.SampleRatio:F3} | {report.Blocks} | {report.PredictedSeconds:F1} | {data.Length} | {archive.Length} | " +
             $"{(double)data.Length / archive.Length:F2} | {compressSeconds:F1} | {decompressSeconds:F1} | {limit:F0} | {same} | {status}");
     }
 

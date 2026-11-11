@@ -6,14 +6,16 @@
 
 namespace Archiver;
 
-// Настройки сжатия. По умолчанию всё включено, отключать нужно только для замеров «до/после»
-public sealed record CompressOptions(bool UseFilters = true)
+// Настройки сжатия. По умолчанию всё включено; остальное нужно только для замеров и проверок.
+// ForceBlocks — сжать ровно этим числом блоков, без оценки времени (для проверки блочного режима).
+public sealed record CompressOptions(bool UseFilters = true, int? ForceBlocks = null)
 {
     public static CompressOptions Default { get; } = new();
 }
 
-// Что выбрал архиватор: для таблиц замеров и журнала сервиса
-public readonly record struct CompressReport(string Kind, string Method, double SampleRatio);
+// Что выбрал архиватор: для таблиц замеров и журнала сервиса.
+// PredictedSeconds — прогноз времени распаковки одним блоком по скорости пробы.
+public readonly record struct CompressReport(string Kind, string Method, double SampleRatio, int Blocks, double PredictedSeconds);
 
 public static class ArchiveCodec
 {
@@ -32,6 +34,24 @@ public static class ArchiveCodec
     private const double MinUsefulRatio = 1.005; // слабее этого сжатие не окупает потраченное время
     private const double CompressedMinUsefulRatio = 1.04; // подобрано всего по двум картинкам, предварительно
 
+    // ---------- Гарантия по времени ----------
+    // Лимит арены на одну операцию (спецификация v1): 10 с + 2 с на каждый МБ
+    private const double LimitBaseSeconds = 10;
+    private const double LimitSecondsPerMegabyte = 2;
+
+    // Прогноз распаковки должен занимать не больше этой доли лимита:
+    // запас на более медленный сервер и на погрешность прогноза
+    private const double TimeBudgetShare = 0.5;
+
+    // Распаковка у наших моделей на 10–30 % медленнее сжатия
+    private const double DecompressSlowdown = 1.3;
+
+    // Блоки на разных ядрах мешают друг другу (общая память), поэтому ускорение меньше, чем число блоков
+    private const double ParallelEfficiency = 0.7;
+
+    private const int MaxBlocks = 8; // каждый блок — своя модель на ~100–180 МБ памяти
+    private const int MinBlockBytes = 4 * 1024 * 1024; // блоки меньше 4 МБ заметно портят сжатие
+
     public static byte[] Compress(byte[] data)
     {
         return Compress(data, CompressOptions.Default, out _);
@@ -43,7 +63,7 @@ public static class ArchiveCodec
 
         if (kind == FileKind.Empty)
         {
-            report = new CompressReport(kind.ToString(), MethodName(StoreMethod), 0);
+            report = new CompressReport(kind.ToString(), MethodName(StoreMethod), 0, 0, 0);
             return WithHeader(StoreMethod, data, data);
         }
 
@@ -93,13 +113,17 @@ public static class ArchiveCodec
         }
 
         // Пробуем все варианты на кусочке одновременно, каждый на своём ядре: они друг от друга не зависят
+        // Заодно засекаем время каждой пробы: по нему прогнозируем время для всего файла
         var samples = new byte[candidates.Count][];
         var probes = new byte[candidates.Count][];
+        var probeSeconds = new double[candidates.Count];
 
         Parallel.For(0, candidates.Count, i =>
         {
             samples[i] = TakeSample(candidates[i].Data);
+            var timer = System.Diagnostics.Stopwatch.StartNew();
             probes[i] = Codec.Compress(samples[i], CreateModel(candidates[i].Method));
+            probeSeconds[i] = timer.Elapsed.TotalSeconds;
         });
 
         // Победителя выбираем по порядку: при равенстве выигрывает тот, кто раньше в списке.
@@ -124,18 +148,56 @@ public static class ArchiveCodec
         // Проба на уже сжатых форматах завышает результат (PNG: проба 1,03, целый файл 1,002)
         if (bestRatio < (kind == FileKind.Compressed ? CompressedMinUsefulRatio : MinUsefulRatio))
         {
-            report = new CompressReport(kind.ToString(), MethodName(StoreMethod), bestRatio);
+            report = new CompressReport(kind.ToString(), MethodName(StoreMethod), bestRatio, 0, 0);
+            return WithHeader(StoreMethod, data, data);
+        }
+
+        // Прогноз: скорость пробы × весь файл. Пробы шли одновременно и мешали друг другу,
+        // поэтому прогноз скорее завышен — это ошибка в безопасную сторону
+        var predictedSeconds = probeSeconds[best] / samples[best].Length * bestData.Length * DecompressSlowdown;
+        var blocks = options.ForceBlocks ?? ChooseBlocks(predictedSeconds, data.Length, bestData.Length);
+
+        if (blocks == 0)
+        {
+            // Даже на всех блоках не успеваем: честно отдаём файл без сжатия, это лучше, чем таймаут
+            report = new CompressReport(kind.ToString(), MethodName(StoreMethod), bestRatio, 0, predictedSeconds);
             return WithHeader(StoreMethod, data, data);
         }
 
         // Если кусочек и есть весь файл, сжимать второй раз незачем
-        var isWholeFile = samples[best].Length == bestData.Length;
-        var payload = isWholeFile ? probes[best] : Codec.Compress(bestData, CreateModel(bestMethod));
+        var isWholeFile = samples[best].Length == bestData.Length && blocks == 1;
+        var payload = isWholeFile
+            ? BlockCodec.WrapSingle(probes[best])
+            : BlockCodec.Compress(bestData, blocks, () => CreateModel(bestMethod));
 
         // Страховка: архив не должен быть больше исходника (лимит арены — 2 × размер + 1024)
         var method = payload.Length < data.Length ? bestMethod : StoreMethod;
-        report = new CompressReport(kind.ToString(), MethodName(method), bestRatio);
+        report = new CompressReport(kind.ToString(), MethodName(method), bestRatio, blocks, predictedSeconds);
         return method == StoreMethod ? WithHeader(StoreMethod, data, data) : WithHeader(method, data, payload);
+    }
+
+    // Сколько блоков нужно, чтобы прогноз уложился в бюджет. 0 — не успеваем даже на всех блоках
+    private static int ChooseBlocks(double predictedSeconds, int originalLength, int dataLength)
+    {
+        var limit = LimitBaseSeconds + LimitSecondsPerMegabyte * originalLength / 1_000_000.0;
+        var budget = limit * TimeBudgetShare;
+
+        if (predictedSeconds <= budget)
+        {
+            return 1;
+        }
+
+        var maxBlocks = Math.Min(Math.Min(MaxBlocks, Environment.ProcessorCount), Math.Max(1, dataLength / MinBlockBytes));
+
+        for (var blocks = 2; blocks <= maxBlocks; blocks++)
+        {
+            if (predictedSeconds / (blocks * ParallelEfficiency) <= budget)
+            {
+                return blocks;
+            }
+        }
+
+        return 0;
     }
 
     // Любая проблема с архивом — InvalidDataException: сервис должен ответить на неё 4xx и не упасть
@@ -159,7 +221,7 @@ public static class ArchiveCodec
 
         try
         {
-            data = method == StoreMethod ? payload : Codec.Decompress(payload, CreateModel(method));
+            data = method == StoreMethod ? payload : BlockCodec.Decompress(payload, () => CreateModel(method));
 
             // Отменяем фильтр, если он был
             data = method switch
