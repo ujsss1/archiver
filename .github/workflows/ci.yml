@@ -1,0 +1,53 @@
+# Автопроверка: GitHub запускает её сам при каждом push и при каждом PR в main.
+# Если что-то сломалось (не собирается, распаковка не совпала с исходником), проверка станет красной.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ---------- Ядро: сборка и проверки ----------
+  core:
+    name: Ядро — сборка и проверки
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Скачать код репозитория
+        uses: actions/checkout@v4
+
+      - name: Установить .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Собрать консольную программу
+        run: dotnet publish core-cs/Archiver.Cli -c Release -o out
+
+      - name: Сжать → распаковать → сравнить
+        run: bash scripts/roundtrip.sh out/archiver
+
+      - name: Испорченные архивы должны отклоняться (selftest)
+        run: out/archiver selftest core-cs/Archiver.Core/Codec.cs
+
+  # ---------- Docker: образ собирается и программа в нём работает ----------
+  docker:
+    name: Docker — сборка образа
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Скачать код репозитория
+        uses: actions/checkout@v4
+
+      - name: Собрать образ
+        run: docker build -t archiver .
+
+      - name: Сжать и распаковать внутри контейнера
+        run: |
+          # «-» значит: читать из стандартного ввода и писать в стандартный вывод
+          docker run --rm -i archiver compress - - < README.md > readme.arc
+          docker run --rm -i archiver decompress - - < readme.arc > readme.out
+          cmp README.md readme.out
+          echo "Образ работает: файл совпал после сжатия и распаковки"
