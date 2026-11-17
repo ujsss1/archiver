@@ -66,7 +66,9 @@ docker run --rm -i archiver decompress - - < output.arc > restored.bin
 Запуск локально (нужен .NET SDK 10):
 
     cd core-cs
-    dotnet run archiver-service.cs
+    dotnet run -c Release archiver-service.cs
+
+Только с `-c Release`: в Debug ядро работает в разы медленнее, и большие файлы уходят без сжатия.
 
 Сервис слушает 0.0.0.0 на порту из переменной ASPNETCORE_HTTP_PORTS (по умолчанию 8080).
 Веб-страница: http://localhost:8080
