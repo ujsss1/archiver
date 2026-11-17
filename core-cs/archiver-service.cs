@@ -1,10 +1,17 @@
 #:sdk Microsoft.NET.Sdk.Web
 #:project Archiver.Core/Archiver.Core.csproj
+// Сразу полностью оптимизированный код (как в Archiver.Cli): иначе первые секунды .NET работает медленнее,
+// и проба времени в ядре ошибочно решит, что файл не успеет сжаться
+#:property TieredCompilation=false
+// Без native AOT: файловые приложения .NET 10 по умолчанию собираются в AOT, а в этом режиме отключён
+// обычный JSON-сериализатор — /v1/health и ответы с ошибками падали бы с 500
+#:property PublishAot=false
 
 // HTTP-сервис архиватора по спецификации арены v1.
 // Ядро — Archiver.Core (контекстные модели + арифметический кодер),
 // этот файл — только обвязка: API + веб-страница.
-// Запуск из папки core-cs: dotnet run archiver-service.cs
+// Запуск из папки core-cs: dotnet run -c Release archiver-service.cs
+// Только Release: в Debug ядро работает в разы медленнее, и большие файлы уходят без сжатия (по прогнозу времени)
 
 using System.Diagnostics;
 using System.Text.Json;
@@ -74,7 +81,7 @@ app.Use(async (context, next) =>
 });
 
 // ---------- веб-страница (встроена в этот же файл, wwwroot не нужен) ----------
-app.MapGet("/", () => Results.Content(PageHtml, "text/html; charset=utf-8"));
+app.MapGet("/", () => Results.Content(Page.Html, "text/html; charset=utf-8"));
 
 // ---------- служебные методы ----------
 app.MapGet("/v1/health", () => Results.Json(new { status = "ok" }));
@@ -88,8 +95,10 @@ app.MapGet("/v1/info", () => Results.Json(new
 }));
 
 // ---------- рабочие методы ----------
-app.MapPost("/v1/compress", (HttpContext ctx) => HandleBytesAsync(ctx, isCompress: true));
-app.MapPost("/v1/decompress", (HttpContext ctx) => HandleBytesAsync(ctx, isCompress: false));
+// Приведение к Delegate обязательно: без него лямбда считается «сырым» обработчиком (RequestDelegate),
+// и возвращённый IResult выбрасывается — сервис отвечал бы 200 с пустым телом (предупреждение ASP0016)
+app.MapPost("/v1/compress", (Delegate)((HttpContext ctx) => HandleBytesAsync(ctx, isCompress: true)));
+app.MapPost("/v1/decompress", (Delegate)((HttpContext ctx) => HandleBytesAsync(ctx, isCompress: false)));
 
 app.Run();
 
@@ -155,7 +164,7 @@ async Task<IResult> HandleBytesAsync(HttpContext context, bool isCompress)
 
 static async Task<byte[]> ReadBodyAsync(HttpRequest request, long limit)
 {
-    if (request.ContentLength is > limit)
+    if (request.ContentLength > limit)
         throw new BodyTooLargeException();
 
     using var ms = new MemoryStream();
@@ -178,13 +187,14 @@ static IResult Error(int status, string code, string message) =>
 static string JsonError(string code, string message) =>
     JsonSerializer.Serialize(new { error = new { code, message } });
 
-sealed class BodyTooLargeException : Exception { }
-
 // =====================================================================
 // Веб-страница: две кнопки, размеры, коэффициент, время, текст ошибки.
 // =====================================================================
 
-const string PageHtml = """
+// Страница — константа в классе: локальную константу нельзя использовать выше её объявления (ошибка CS0841)
+static class Page
+{
+    public const string Html = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -289,3 +299,7 @@ document.getElementById("btnD").onclick = () =>
 </body>
 </html>
 """;
+}
+
+// Объявления типов — только в конце файла: после них верхнеуровневый код писать нельзя (ошибка CS8803)
+sealed class BodyTooLargeException : Exception { }
