@@ -58,5 +58,36 @@ docker build -t archiver .
 docker run --rm -i archiver compress - - < input.bin > output.arc
 docker run --rm -i archiver decompress - - < output.arc > restored.bin
 ```
+## HTTP-сервис (API арены)
+
+Сервис в одном файле: core-cs/archiver-service.cs
+Ядро подключается как библиотека Archiver.Core, сжатие и распаковка — через ArchiveCodec.
+
+Запуск локально (нужен .NET SDK 10):
+
+    cd core-cs
+    dotnet run archiver-service.cs
+
+Сервис слушает 0.0.0.0 на порту из переменной ASPNETCORE_HTTP_PORTS (по умолчанию 8080).
+Веб-страница: http://localhost:8080
+
+Переменные окружения:
+- ASPNETCORE_HTTP_PORTS — порт прослушивания (по умолчанию 8080)
+- ARENA_TOKEN — если задан, /v1/compress и /v1/decompress требуют заголовок Authorization: Bearer <токен>; если не задан — проверка отключена
+
+Методы: GET /v1/health, GET /v1/info, POST /v1/compress, POST /v1/decompress.
+Тела запросов — только сырые байты, до 110 МБ, поддерживается Transfer-Encoding: chunked.
+Пустой файл работает в обе стороны.
+Ошибки всегда в формате {"error":{"code":...,"message":...}}:
+400 bad_archive, 413 too_large, 401 unauthorized, 500 internal.
+
+Гарантии: тяжёлая операция выполняется одна за раз, /v1/health не блокируется,
+на диск ничего не пишется, переадресаций нет, каждый запрос логируется одной строкой
+без содержимого файлов.
+
+Docker (образ только с сервисом, ядро собирается внутри):
+
+    docker build -f Dockerfile.service -t archiver-service .
+    docker run -p 8080:8080 archiver-service
 
 Сейчас в образе только ядро. Когда появится сервис с API, он добавится в этот же `Dockerfile`.
