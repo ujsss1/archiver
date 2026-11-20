@@ -12,7 +12,8 @@ interface IModel
 // чем увереннее и вернее предсказание, тем меньше сужение и тем меньше места занимает бит.
 static class Codec
 {
-    public static byte[] Compress(byte[] data, IModel model)
+    public static byte[] Compress<TModel>(ReadOnlySpan<byte> data, TModel model)
+        where TModel : IModel
     {
         var output = new byte[data.Length + data.Length / 8 + 1024];
         var size = 0;
@@ -78,7 +79,8 @@ static class Codec
         return output;
     }
 
-    public static byte[] Decompress(byte[] archive, IModel model)
+    public static byte[] Decompress<TModel>(ReadOnlySpan<byte> archive, TModel model)
+        where TModel : IModel
     {
         // Битый архив может «заявить» любой размер: не даём ему выделить гигантский массив
         const long MaxLength = 1L << 30;
@@ -344,7 +346,9 @@ static class BlockCodec
 {
     private const int MaxBlocks = 64; // защита от битого архива: больше блоков мы никогда не пишем
 
-    public static byte[] Compress(byte[] data, int blocks, Func<IModel> newModel)
+    public static byte[] Compress<TModel>(
+        byte[] data, int blocks, Func<TModel> newModel)
+        where TModel : IModel
     {
         var blockSize = (data.Length + blocks - 1) / blocks;
         var parts = new byte[blocks][];
@@ -353,7 +357,7 @@ static class BlockCodec
         {
             var start = Math.Min(i * blockSize, data.Length);
             var length = Math.Min(blockSize, data.Length - start);
-            parts[i] = Codec.Compress(data.AsSpan(start, length).ToArray(), newModel());
+            parts[i] = Codec.Compress(data.AsSpan(start, length), newModel());
         });
 
         using var output = new MemoryStream();
@@ -381,10 +385,12 @@ static class BlockCodec
         return result;
     }
 
-    public static byte[] Decompress(byte[] payload, Func<IModel> newModel)
+    public static byte[] Decompress<TModel>(
+        ReadOnlyMemory<byte> payload, Func<TModel> newModel)
+        where TModel : IModel
     {
         var position = 0;
-        var blocks = ReadNumber(payload, ref position);
+        var blocks = ReadNumber(payload.Span, ref position);
 
         if (blocks < 1 || blocks > MaxBlocks)
         {
@@ -398,7 +404,7 @@ static class BlockCodec
 
         for (var i = 0; i < blocks - 1; i++)
         {
-            sizes[i] = ReadNumber(payload, ref position);
+            sizes[i] = ReadNumber(payload.Span, ref position);
         }
 
         for (var i = 0; i < blocks; i++)
@@ -419,7 +425,7 @@ static class BlockCodec
 
         Parallel.For(0, (int)blocks, i =>
         {
-            parts[i] = Codec.Decompress(payload.AsSpan(starts[i], lengths[i]).ToArray(), newModel());
+            parts[i] = Codec.Decompress(payload.Span.Slice(starts[i], lengths[i]), newModel());
         });
 
         // Склеиваем блоки обратно
@@ -453,7 +459,7 @@ static class BlockCodec
         output.WriteByte((byte)value);
     }
 
-    private static long ReadNumber(byte[] data, ref int position)
+    private static long ReadNumber(ReadOnlySpan<byte> data, ref int position)
     {
         var value = 0L;
 
