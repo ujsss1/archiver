@@ -122,7 +122,7 @@ public static class ArchiveCodec
         {
             samples[i] = TakeSample(candidates[i].Data);
             var timer = System.Diagnostics.Stopwatch.StartNew();
-            probes[i] = Codec.Compress(samples[i], CreateModel(candidates[i].Method));
+            probes[i] = CompressSample(samples[i], candidates[i].Method);
             probeSeconds[i] = timer.Elapsed.TotalSeconds;
         });
 
@@ -146,7 +146,15 @@ public static class ArchiveCodec
         var (bestMethod, bestData) = candidates[best];
 
         // Проба на уже сжатых форматах завышает результат (PNG: проба 1,03, целый файл 1,002)
-        if (bestRatio < (kind == FileKind.Compressed ? CompressedMinUsefulRatio : MinUsefulRatio))
+        // Если проба охватила весь сжатый файл, точный размер уже известен.
+        // К потоку кодера добавится один байт с числом блоков.
+        var wholeCompressedFile = kind == FileKind.Compressed
+            && samples[best].Length == data.Length;
+        var useStore = wholeCompressedFile
+            ? (long)probes[best].Length + 1 >= data.Length
+            : bestRatio < (kind == FileKind.Compressed ? CompressedMinUsefulRatio : MinUsefulRatio);
+
+        if (useStore)
         {
             report = new CompressReport(kind.ToString(), MethodName(StoreMethod), bestRatio, 0, 0);
             return WithHeader(StoreMethod, data, data);
@@ -168,7 +176,7 @@ public static class ArchiveCodec
         var isWholeFile = samples[best].Length == bestData.Length && blocks == 1;
         var payload = isWholeFile
             ? BlockCodec.WrapSingle(probes[best])
-            : BlockCodec.Compress(bestData, blocks, () => CreateModel(bestMethod));
+            : CompressBlocks(bestData, blocks, bestMethod);
 
         // Страховка: архив не должен быть больше исходника (лимит арены — 2 × размер + 1024)
         var method = payload.Length < data.Length ? bestMethod : StoreMethod;
@@ -216,12 +224,12 @@ public static class ArchiveCodec
         }
 
         var expectedCrc = BitConverter.ToUInt32(archive, 1);
-        var payload = archive[HeaderBytes..];
+        var payload = archive.AsMemory(HeaderBytes);
         byte[] data;
 
         try
         {
-            data = method == StoreMethod ? payload : BlockCodec.Decompress(payload, () => CreateModel(method));
+            data = method == StoreMethod ? payload.ToArray() : DecompressBlocks(payload, method);
 
             // Отменяем фильтр, если он был
             data = method switch
@@ -265,9 +273,30 @@ public static class ArchiveCodec
         };
     }
 
-    private static IModel CreateModel(byte method)
+    private static bool UsesMatchModel(byte method)
     {
-        return method is MatchMethod or MatchX86Method or MatchCsvMethod ? new MatchMixModel() : new ContextMixingModel();
+        return method is MatchMethod or MatchX86Method or MatchCsvMethod;
+    }
+
+    private static byte[] CompressSample(byte[] data, byte method)
+    {
+        return UsesMatchModel(method)
+            ? Codec.Compress(data, new MatchMixModel())
+            : Codec.Compress(data, new ContextMixingModel());
+    }
+
+    private static byte[] CompressBlocks(byte[] data, int blocks, byte method)
+    {
+        return UsesMatchModel(method)
+            ? BlockCodec.Compress(data, blocks, () => new MatchMixModel())
+            : BlockCodec.Compress(data, blocks, () => new ContextMixingModel());
+    }
+
+    private static byte[] DecompressBlocks(ReadOnlyMemory<byte> payload, byte method)
+    {
+        return UsesMatchModel(method)
+            ? BlockCodec.Decompress(payload, () => new MatchMixModel())
+            : BlockCodec.Decompress(payload, () => new ContextMixingModel());
     }
 
     private static byte[] WithHeader(byte method, byte[] original, byte[] payload)

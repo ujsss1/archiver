@@ -21,7 +21,6 @@
 | Папка | Что внутри |
 |---|---|
 | `core-cs/` | ядро архиватора на C#: библиотека `Archiver.Core` и консольная программа `Archiver.Cli` ([подробнее](core-cs/README.md)) |
-| `core/` | версия 0 на Python (выбор лучшего из zlib/bz2/lzma) — оставлена для сравнения |
 | `docs/` | описание алгоритма ([algorithm.md](docs/algorithm.md)) |
 | `scripts/` | `roundtrip.sh` — проверка ядра «сжал → распаковал → сравнил», `service-check.sh` — проверка API сервиса |
 | `.github/workflows/` | автопроверка CI |
