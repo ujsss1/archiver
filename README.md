@@ -23,9 +23,9 @@
 | `core-cs/` | ядро архиватора на C#: библиотека `Archiver.Core` и консольная программа `Archiver.Cli` ([подробнее](core-cs/README.md)) |
 | `core/` | версия 0 на Python (выбор лучшего из zlib/bz2/lzma) — оставлена для сравнения |
 | `docs/` | описание алгоритма ([algorithm.md](docs/algorithm.md)) |
-| `scripts/` | `roundtrip.sh` — проверка «сжал → распаковал → сравнил» |
+| `scripts/` | `roundtrip.sh` — проверка ядра «сжал → распаковал → сравнил», `service-check.sh` — проверка API сервиса |
 | `.github/workflows/` | автопроверка CI |
-| `Dockerfile` | сборка ядра в Docker-образ |
+| `Dockerfile`, `docker-compose.yml` | Docker-образ сервиса и его запуск на сервере |
 
 ## Как собрать и запустить
 
@@ -48,16 +48,18 @@ bash scripts/roundtrip.sh out/archiver
 Скрипт генерирует тестовые файлы (пустой, 1 байт, нули, случайные байты, текст, CSV), сжимает и распаковывает каждый и проверяет правила арены:
 распакованный файл совпадает с исходным, архив не больше `2 × размер + 1024` байт, на битый архив программа возвращает код 2 (сервис ответит `4xx`).
 
-**CI.** При каждом push и PR в `main` GitHub сам собирает ядро, запускает `roundtrip.sh` и `selftest` и собирает Docker-образ.
-Результат — на вкладке Actions и в PR. PR с красной проверкой в `main` не вливаем.
-
-## Docker
+Проверка запущенного сервиса по сценарию «Проверить API» арены (health, сжатие → распаковка, пустой файл, битый архив → `4xx`):
 
 ```bash
-docker build -t archiver .
-docker run --rm -i archiver compress - - < input.bin > output.arc
-docker run --rm -i archiver decompress - - < output.arc > restored.bin
+bash scripts/service-check.sh http://localhost:8080
 ```
+
+Если сервис запущен с токеном, передайте его скрипту: `ARENA_TOKEN=<токен> bash scripts/service-check.sh ...` — тогда проверится ещё и ответ `401` без токена.
+
+**CI.** При каждом push и PR в `main` GitHub сам собирает ядро и прогоняет `roundtrip.sh` и `selftest`,
+а также собирает Docker-образ сервиса, запускает его и прогоняет `service-check.sh`.
+Результат — на вкладке Actions и в PR. PR с красной проверкой в `main` не вливаем.
+
 ## HTTP-сервис (API арены)
 
 Сервис в одном файле: core-cs/archiver-service.cs
@@ -87,9 +89,19 @@ docker run --rm -i archiver decompress - - < output.arc > restored.bin
 на диск ничего не пишется, переадресаций нет, каждый запрос логируется одной строкой
 без содержимого файлов.
 
-Docker (образ только с сервисом, ядро собирается внутри):
+## Docker
 
-    docker build -f Dockerfile.service -t archiver-service .
-    docker run -p 8080:8080 archiver-service
+Образ с сервисом (ядро собирается внутри, сборка всегда в Release):
 
-Сейчас в образе только ядро. Когда появится сервис с API, он добавится в этот же `Dockerfile`.
+```bash
+docker build -t archiver-service .
+docker run --rm -p 8080:8080 archiver-service
+```
+
+На сервере — через docker compose: автоперезапуск при падении, лимит памяти, токен из файла `.env`:
+
+```bash
+cp .env.example .env        # вписать токен арены в .env (файл не коммитим)
+docker compose up -d --build
+docker compose logs -f
+```

@@ -32,7 +32,8 @@ jobs:
       - name: Испорченные архивы должны отклоняться (selftest)
         run: out/archiver selftest core-cs/Archiver.Core/Codec.cs
 
-  # ---------- Docker: образ собирается и программа в нём работает ----------
+  # ---------- Docker: образ сервиса собирается, и сервис в нём проходит проверку API ----------
+  # Имена задач не менять: правило защиты main требует проверки именно с этими названиями
   docker:
     name: Docker — сборка образа
     runs-on: ubuntu-latest
@@ -41,13 +42,15 @@ jobs:
       - name: Скачать код репозитория
         uses: actions/checkout@v4
 
-      - name: Собрать образ
-        run: docker build -t archiver .
+      - name: Собрать образ сервиса
+        run: docker build -t archiver-service .
 
-      - name: Сжать и распаковать внутри контейнера
-        run: |
-          # «-» значит: читать из стандартного ввода и писать в стандартный вывод
-          docker run --rm -i archiver compress - - < README.md > readme.arc
-          docker run --rm -i archiver decompress - - < readme.arc > readme.out
-          cmp README.md readme.out
-          echo "Образ работает: файл совпал после сжатия и распаковки"
+      - name: Запустить сервис в контейнере (с тестовым токеном)
+        run: docker run -d --name archiver -p 8080:8080 -e ARENA_TOKEN=ci-test-token archiver-service
+
+      - name: Проверка API по сценарию арены
+        run: ARENA_TOKEN=ci-test-token bash scripts/service-check.sh http://localhost:8080
+
+      - name: Журнал сервиса (если проверка упала)
+        if: failure()
+        run: docker logs archiver
