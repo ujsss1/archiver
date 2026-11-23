@@ -29,6 +29,7 @@ public static class ArchiveCodec
     private const byte MatchX86Method = 3; // фильтр адресов x86 + CM match
     private const byte ContextCsvMethod = 4; // столбцы CSV + CM 1-6
     private const byte MatchCsvMethod = 5; // столбцы CSV + CM match
+    private const byte MatchRecords8Method = 6; // записи по 8 байт + CM match
 
     private const int SamplePartBytes = 85 * 1024;
     private const double MinUsefulRatio = 1.005; // слабее этого сжатие не окупает потраченное время
@@ -101,6 +102,11 @@ public static class ArchiveCodec
                     if (X86Filter.Decode(filtered).AsSpan().SequenceEqual(data))
                     {
                         candidates.Add((MatchX86Method, filtered));
+                    }
+
+                    if (data.Length >= 16)
+                    {
+                        candidates.Add((MatchRecords8Method, RecordShuffle8.Encode(data)));
                     }
                 }
 
@@ -218,7 +224,7 @@ public static class ArchiveCodec
 
         var method = (byte)(archive[0] & ~SignatureMask);
 
-        if (method > MatchCsvMethod)
+        if (method > MatchRecords8Method)
         {
             throw new InvalidDataException($"Неизвестный метод: {method}");
         }
@@ -236,6 +242,7 @@ public static class ArchiveCodec
             {
                 MatchX86Method => X86Filter.Decode(data),
                 ContextCsvMethod or MatchCsvMethod => CsvColumns.Decode(data),
+                MatchRecords8Method => RecordShuffle8.Decode(data),
                 _ => data,
             };
         }
@@ -269,13 +276,14 @@ public static class ArchiveCodec
             MatchX86Method => "x86 + CM match",
             ContextCsvMethod => "столбцы + CM 1-6",
             MatchCsvMethod => "столбцы + CM match",
+            MatchRecords8Method => "записи по 8 байт + CM match",
             _ => "неизвестно",
         };
     }
 
     private static bool UsesMatchModel(byte method)
     {
-        return method is MatchMethod or MatchX86Method or MatchCsvMethod;
+        return method is MatchMethod or MatchX86Method or MatchCsvMethod or MatchRecords8Method;
     }
 
     private static byte[] CompressSample(byte[] data, byte method)

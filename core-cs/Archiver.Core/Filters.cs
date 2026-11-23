@@ -214,3 +214,37 @@ static class CsvColumns
         return result;
     }
 }
+
+// Группирует байты полных 8-байтовых записей по позиции внутри записи.
+// Хвост неполной записи копируется в конец без изменений.
+static class RecordShuffle8
+{
+    private const int Width = 8;
+
+    public static byte[] Encode(byte[] data) => Transform(data, encode: true);
+
+    public static byte[] Decode(byte[] data) => Transform(data, encode: false);
+
+    private static byte[] Transform(byte[] data, bool encode)
+    {
+        var result = new byte[data.Length];
+        var fullLength = data.Length - data.Length % Width;
+        var groupedIndex = 0;
+
+        for (var column = 0; column < Width; column++)
+        {
+            for (var index = column; index < fullLength; index += Width)
+            {
+                if (encode)
+                    result[groupedIndex] = data[index];
+                else
+                    result[index] = data[groupedIndex];
+
+                groupedIndex++;
+            }
+        }
+
+        data.AsSpan(fullLength).CopyTo(result.AsSpan(fullLength));
+        return result;
+    }
+}
