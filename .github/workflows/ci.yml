@@ -51,6 +51,9 @@ jobs:
       - name: Проверка API по сценарию арены
         run: ARENA_TOKEN=ci-test-token bash scripts/service-check.sh http://localhost:8080
 
+      - name: Проверки крайних случаев от QA
+        run: ARENA_TOKEN=ci-test-token bash qa/scripts/qa-edge-cases.sh http://localhost:8080
+
       - name: Журнал сервиса (если проверка упала)
         if: failure()
         run: docker logs archiver
